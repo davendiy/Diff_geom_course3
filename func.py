@@ -12,6 +12,7 @@
 from threading import RLock
 import typing as typ
 import inspect
+import numpy as np
 
 ADDITION       = '+'
 SUBTRACTION    = '-'
@@ -46,9 +47,29 @@ SIMPLE_DERIVATIVES = {
     ADDITION:       lambda u, v, u_der, v_der: u_der + v_der,
     SUBTRACTION:    lambda u, v, u_der, v_der: u_der - v_der,
     MULTIPLICATION: lambda u, v, u_der, v_der: u_der * v + u * v_der,
-    DIVISION:       lambda u, v, u_der, v_der: (u_der * v - u * v_der) / (v * v),
-    R_DIVISION:     lambda u, v, u_der, v_der: (v_der * u - v * u_der) / (u * u),
+    DIVISION:       lambda u, v, u_der, v_der: (u_der * v - u * v_der) / (v ** 2),
+    R_DIVISION:     lambda u, v, u_der, v_der: (v_der * u - v * u_der) / (u ** 2),
     R_SUBTRACTION:  lambda u, v, u_der, v_der: v_der - u_der
+}
+
+inf = float('inf')
+
+
+def get_power(n):
+
+    def _res(x):
+        return x ** n
+
+    return _res
+
+
+ELEMENTARY_FUNCTIONS = {
+    'sin':  (np.sin, -inf, inf),
+    'cos':  (np.cos, -inf, inf),
+    'sqrt': (np.sqrt, 0, inf),
+    'tan':  (np.tan, -np.pi/2, np.pi/2),
+    'log':  (np.log, 0, inf),
+    'pow':  (get_power, -inf, inf)
 }
 
 LOCK = RLock()
@@ -82,12 +103,38 @@ class Var:
     def __init__(self, name: str, left=float('-inf'), right=float('inf')):
         self.name = name
         self._value = None
-        self.left = left
-        self.right = right
+        self._left = left
+        self._right = right
+
+    @property
+    def value(self):
+        return self()
+
+    @value.setter
+    def value(self, value: typ.Union[float, int]):
+        self.set_value(value)
 
     def set_value(self, value: typ.Union[float, int]):
         with LOCK:
             self._value = value
+
+    @property
+    def left(self):
+        return self._left
+
+    @left.setter
+    def left(self, left: typ.Union[float, int]):
+        with LOCK:
+            self._left = left
+
+    @property
+    def right(self):
+        return self._right
+
+    @right.setter
+    def right(self, right: typ.Union[float, int]):
+        with LOCK:
+            self._right = right
 
     def __hash__(self):
         return hash(self.name)
@@ -123,6 +170,11 @@ class Var:
     def __repr__(self):
         return f"Var('{self.name}')"
 
+
+# TODO:
+#      - add parser
+#      - add domains for elementary functions
+#      -
 
 class Function:
 
@@ -185,12 +237,15 @@ class Function:
         assert isinstance(other, Function) or isinstance(other, Var) \
             or isinstance(other, int) or isinstance(other, float), 'bad operand'
         assert operation_type in BINARY_OPERATORS, 'bad operation'
+
         if isinstance(other, Var):
-            other = Function(FROM_VAR, {other}, other)
+            res_other = Function(FROM_VAR, {other}, other)
         elif isinstance(other, float) or isinstance(other, int):
-            other = Function(FROM_CONST, set(), other)
-        return Function(operation_type, self._vars | other._vars,
-                        self, other)
+            res_other = Function(FROM_CONST, set(), other)
+        else:
+            res_other = other
+        return Function(operation_type, self._vars | res_other._vars,
+                        self, res_other)
 
     def __add__(self, other):
         return self._binary(other, ADDITION)
@@ -216,7 +271,7 @@ class Function:
     def __rsub__(self, other):
         return self._binary(other, R_SUBTRACTION)
 
-    def superposition(self, **others):
+    def substitute(self, **others):
         """ return f(...) = self(other(...))
         """
         given_pars = set(others.keys())
@@ -291,7 +346,7 @@ class Function:
         # sum of ( dF / d _sub_var ) * (d _sub_var / d var)
         for _sub_var in F._vars:
             dFdf = F.partial_derivative(_sub_var)
-            dFdf = dFdf.superposition(**self._superpos_sons)
+            dFdf = dFdf.substitute(**self._superpos_sons)
             f = self._superpos_sons[_sub_var.name]  # type: Function
             dfdx = f.partial_derivative(var)
             res += dFdf * dfdx
@@ -347,9 +402,92 @@ class Function:
         res = SIMPLE_DERIVATIVES[self._main_op](u, v, u_der, v_der)  # type: Function
         return res
 
+    def partial_derivative_n(self, *variables: Var):
+        res = self
+        for var in variables:
+            res = res.partial_derivative(var)
+        return res
+
+    def get_vars(self):
+        return self._vars
+
+    def __pow__(self, power, modulo=None):
+        if modulo:
+            raise NotImplementedError()
+
+        if isinstance(power, int):
+            tmp_var = Var("___tmp_var___")
+            tmp_func = ElementaryFunction('pow', tmp_var, n=power)
+            return tmp_func.substitute(___tmp_var___=self)
+        else:
+            raise NotImplementedError()
+
+
+class ElementaryFunction(Function):
+
+    def __init__(self, func_name, variable: Var, n=2):
+        if func_name not in ELEMENTARY_FUNCTIONS:
+            raise NotImplementedError("Unknown function type")
+
+        self._el_type = func_name
+        self._n = n
+        func, left, right = ELEMENTARY_FUNCTIONS[func_name]
+        variable.left = max(variable.left, left)
+        variable.right = min(variable.right, right)
+
+        if self._el_type == 'pow':
+            if n == 1:
+                super(ElementaryFunction, self).__init__(FROM_VAR, {variable},
+                                                         variable)
+            elif n == 0:
+                super(ElementaryFunction, self).__init__(FROM_CONST, set(), 0)
+            else:
+                func = get_power(n)
+                super(ElementaryFunction, self).__init__(FROM_FUNC, {variable},
+                                                         func, name=f'pow{n}',
+                                                         check_signature=False)
+        else:
+            super(ElementaryFunction, self).__init__(FROM_FUNC, {variable}, func,
+                                                     name=func_name, check_signature=False)
+
+    def _simple_derivative(self, var: Var):
+        assert self._main_op == FROM_FUNC
+        assert var in self._vars
+
+        if self._el_type == 'sin':
+            return ElementaryFunction('cos', var)
+        elif self._el_type == 'cos':
+            return ElementaryFunction('sin', var) * (-1)
+        elif self._el_type == 'sqrt':
+            nom = from_const_factory(1)
+            denom = ElementaryFunction('sqrt', var) * 2
+            return nom / denom
+        elif self._el_type == 'tan':
+            nom = from_const_factory(1)
+            denom = ElementaryFunction('cos', var) ** 2
+            return nom / denom
+        elif self._el_type == 'log':
+            nom = from_const_factory(1)
+            denom = from_var_factory(var)
+            return nom / denom
+        elif self._el_type == 'pow':
+            return ElementaryFunction('pow', var, self._n-1) * self._n
+        else:
+            raise NotImplementedError()
+
+    def __call__(self, **kwargs):
+        if self._main_op == FROM_FUNC:
+            var = next(iter(self._vars))
+            value = kwargs.get(var, None)
+            if value is None:
+                value = var()
+            return self._sons[0](value)
+        else:
+            return super(ElementaryFunction, self).__call__(**kwargs)
+
 
 def from_func_factory(func: callable, variables: typ.Set[Var], name=''):
-    return Function(FROM_FUNC, variables, func, name=name)
+    return Function(FROM_FUNC,    variables, func, name=name)
 
 
 def from_var_factory(var: Var):
@@ -358,3 +496,30 @@ def from_var_factory(var: Var):
 
 def from_const_factory(const: typ.Union[int, float]):
     return Function(FROM_CONST, set(), const)
+
+
+def _elementary_factory(name: str):
+
+    def _res_factory(x: typ.Union[Function, int, float, Var]) -> Function:
+        if isinstance(x, int) or isinstance(x, float):
+            func, _, _ = ELEMENTARY_FUNCTIONS[name]
+            return from_const_factory(func(x))
+
+        elif isinstance(x, Var):
+            return ElementaryFunction(name, x)
+
+        elif isinstance(x, Function):
+            tmp_var = Var('___tmp___')
+            tmp_func = ElementaryFunction(name, tmp_var)
+            return tmp_func.substitute(___tmp___=x)
+        else:
+            raise TypeError(f"Unknown variable type: {x}")
+
+    return _res_factory
+
+
+cos = _elementary_factory('cos')
+sin = _elementary_factory('sin')
+sqrt = _elementary_factory('sqrt')
+tan = _elementary_factory('tan')
+log = _elementary_factory('log')

@@ -12,6 +12,7 @@
 import unittest
 from func import *
 import random
+import numpy as np
 
 
 # noinspection DuplicatedCode
@@ -137,8 +138,8 @@ class MyTestCase(unittest.TestCase):
         test_h = from_func_factory(h, {x3_var})
         test_t = from_func_factory(t, {x4_var, x5_var})
 
-        subs_f = test_f.superposition(x1=test_h, x2=test_t)
-        subs_g = test_g.superposition(x1=test_h, x2=test_h)
+        subs_f = test_f.substitute(x1=test_h, x2=test_t)
+        subs_g = test_g.substitute(x1=test_h, x2=test_h)
 
         x1_var.set_value(random.randrange(-100, 100))
         x2_var.set_value(random.randrange(-100, 100))
@@ -225,7 +226,7 @@ class MyTestCase(unittest.TestCase):
                                                                     test_g_der()),
                                        delta=delta)
 
-    def test_superpos(self):
+    def test_superposDer(self):
 
         def f(x1, x2):
             return x1 + x2
@@ -256,8 +257,8 @@ class MyTestCase(unittest.TestCase):
         test_h = from_func_factory(h, {x3_var})
         test_t = from_func_factory(t, {x4_var, x5_var})
 
-        subs_f = test_f.superposition(x1=test_h, x2=test_t)
-        subs_g = test_g.superposition(x1=test_h, x2=test_h)
+        subs_f = test_f.substitute(x1=test_h, x2=test_t)
+        subs_g = test_g.substitute(x1=test_h, x2=test_h)
 
         subs_f2 = from_func_factory(f_ht, {x3_var, x4_var, x5_var})
         subs_g2 = from_func_factory(g_hh, {x3_var,})
@@ -277,6 +278,64 @@ class MyTestCase(unittest.TestCase):
             self.assertAlmostEqual(subs_f_der(), subs_f2_der(), delta=delta)
             self.assertAlmostEqual(subs_g_der(), subs_g2_der(), delta=delta)
 
+    def test_ElementaryFuncs(self):
+
+        x_var = Var('x')
+
+        self._check(sin(x_var), np.sin, np.cos, x_var, -100, 100,
+                    delta=10e-6)
+        self._check(cos(x_var), np.cos, lambda x: -np.sin(x), x_var, -100, 100,
+                    delta=10e-6)
+        self._check(tan(x_var), np.tan, lambda x: 1 / (np.cos(x) ** 2), x_var,
+                    delta=10e-6, uniform=True)
+
+        self._check(log(x_var), np.log, lambda x: 1 / x, x_var,
+                    delta=10e-6, uniform=True)
+        self._check(sqrt(x_var), np.sqrt, lambda x: 1 / (2 * np.sqrt(x)), x_var,
+                    0, 1000, delta=10e-6)
+
+    def _check(self, func: Function, np_func, np_der, x_var, left=0, right=1, delta=10e-6, uniform=False):
+        if uniform:
+            x_var.set_value(random.random())
+        else:
+            x_var.set_value(random.randrange(left, right))
+
+        self.assertAlmostEqual(func(), np_func(x_var()), delta=delta)
+        self.assertAlmostEqual(func.partial_derivative(x_var)(), np_der(x_var()),
+                               delta=delta)
+
+
+    def test_ElementaryFuncs2(self):
+
+        def f(x1, x2, x3):
+            return np.sqrt(np.cos(x1) ** 2 + np.sin(x2) ** 4) + x3
+
+        x1_var = Var('x1')
+        x2_var = Var('x2')
+        x3_var = Var('x3')
+        x4_var = Var('x4')
+
+        x1_var.set_value(random.random())
+        x2_var.set_value(random.random())
+        x3_var.set_value(random.random())
+        x4_var.set_value(random.random())
+
+        delta = 10e-7
+
+        test_f1 = from_func_factory(f, {x1_var, x2_var, x3_var})
+        test_f2 = sqrt(cos(x1_var) ** 2 + sin(x2_var) ** 4) + x3_var
+
+        self.assertAlmostEqual(test_f1(), test_f2(), delta=delta)
+
+        for _x in [x1_var, x2_var, x3_var, x4_var]:
+            self.assertAlmostEqual(test_f1.partial_derivative(_x)(),
+                                   test_f2.partial_derivative(_x)(),
+                                   delta=delta)
+
+# TODO: add more unit tests
+#       - partial derivative n
+#       - elementary functions
+#       - power for any function
 
 if __name__ == '__main__':
     unittest.main()
