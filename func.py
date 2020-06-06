@@ -20,26 +20,35 @@ MULTIPLICATION = '*'
 DIVISION       = '/'
 R_DIVISION     = '\\'
 SUPERPOSITION  = '@'
-FROM_FUNC      = '_func_doc_'
-FROM_VAR       = '_var_name_'
-FROM_CONST     = '_constant_'
+FROM_FUNC      = 'simple_func'
+FROM_VAR       = 'var'
+FROM_CONST     = 'const'
 
-BINARY = {ADDITION, SUBTRACTION, MULTIPLICATION, DIVISION,
-          R_DIVISION, R_SUBTRACTION}
+BINARY_OPERATORS = {ADDITION, SUBTRACTION, MULTIPLICATION, DIVISION,
+                    R_DIVISION, R_SUBTRACTION}
 
-UNARY = {FROM_FUNC, FROM_VAR, FROM_CONST}
+UNARY_OPERATORS = {FROM_FUNC, FROM_VAR, FROM_CONST}
 
-SPECIAL = {SUPERPOSITION, }
+SPECIAL_OPERATORS = {SUPERPOSITION, }
 
-OPERATIONS = BINARY | UNARY | SPECIAL
+OPERATORS = BINARY_OPERATORS | UNARY_OPERATORS | SPECIAL_OPERATORS
 
-BINARY_OPERATIONS = {
+BINARY_DICT = {
     ADDITION:       lambda x, y: x + y,
     SUBTRACTION:    lambda x, y: x - y,
     MULTIPLICATION: lambda x, y: x * y,
     DIVISION:       lambda x, y: x / y,
     R_DIVISION:     lambda x, y: y / x,
     R_SUBTRACTION:  lambda x, y: y - x,
+}
+
+SIMPLE_DERIVATIVES = {
+    ADDITION:       lambda u, v, u_der, v_der: u_der + v_der,
+    SUBTRACTION:    lambda u, v, u_der, v_der: u_der - v_der,
+    MULTIPLICATION: lambda u, v, u_der, v_der: u_der * v + u * v_der,
+    DIVISION:       lambda u, v, u_der, v_der: (u_der * v - u * v_der) / (v * v),
+    R_DIVISION:     lambda u, v, u_der, v_der: (v_der * u - v * u_der) / (u * u),
+    R_SUBTRACTION:  lambda u, v, u_der, v_der: v_der - u_der
 }
 
 LOCK = RLock()
@@ -117,14 +126,16 @@ class Var:
 
 class Function:
 
+    delta_x = 10e-5
+
     def __init__(self, main_op: str, variables: typ.Set[Var],
                  *sons: typ.Union[typ.Callable, float, int],
-                 name='', **superpos_sons):
-        assert main_op in OPERATIONS, 'bad operation'
+                 name='', check_signature=True, **superpos_sons):
+        assert main_op in OPERATORS, 'bad operation'
         assert all(isinstance(var, Var) for var in variables), 'bad variable'
-        assert not (len(sons) > 1 and main_op in UNARY), 'bad amount of sons'
-        assert not (len(sons) != 2 and main_op in BINARY), 'bad amount of sons'
-        assert not (main_op in BINARY and
+        assert not (len(sons) > 1 and main_op in UNARY_OPERATORS), 'bad amount of sons'
+        assert not (len(sons) != 2 and main_op in BINARY_OPERATORS), 'bad amount of sons'
+        assert not (main_op in BINARY_OPERATORS and
                     any(not isinstance(son, Function) for son in sons)), 'bad type of sons'
 
         assert not (len(sons) != 1 and main_op == SUPERPOSITION
@@ -136,7 +147,7 @@ class Function:
         self._superpos_sons = superpos_sons
         self._sons = sons
         self.name = name
-        if self._main_op == FROM_FUNC:
+        if self._main_op == FROM_FUNC and check_signature:
             self._check_function()
 
         if self._main_op == SUPERPOSITION:
@@ -155,6 +166,10 @@ class Function:
                 raise TypeError(f"Element with type for superposition: {el}")
             sons_vars |= el._vars
 
+        if sons_vars != self._vars:
+            raise ValueError(f'Conflict between given and substitutions'
+                             f'variables: given: {self._vars}, subs: {sons_vars}')
+
         if sons_vars & func._vars:
             raise ValueError(f"Super func should be free from substitutions' "
                              f"variables. Conflicts: {sons_vars & func._vars}")
@@ -169,7 +184,7 @@ class Function:
     def _binary(self, other, operation_type):
         assert isinstance(other, Function) or isinstance(other, Var) \
             or isinstance(other, int) or isinstance(other, float), 'bad operand'
-        assert operation_type in BINARY, 'bad operation'
+        assert operation_type in BINARY_OPERATORS, 'bad operation'
         if isinstance(other, Var):
             other = Function(FROM_VAR, {other}, other)
         elif isinstance(other, float) or isinstance(other, int):
@@ -210,6 +225,7 @@ class Function:
                              f"got {given_pars}")
 
         res_kwargs = {}
+        res_vars = set()
         for var in self._vars:
             value = others[var.name]
             if isinstance(value, Function):
@@ -221,11 +237,14 @@ class Function:
             else:
                 raise TypeError(f"Element with unknown type for superposition: {value}")
 
-        return Function(SUPERPOSITION, set(), self, name='', **res_kwargs)
+            res_vars |= res_kwargs[var.name]._vars
+
+        return Function(SUPERPOSITION, res_vars, self, name='', **res_kwargs)
 
     def __call__(self, **kwargs):
         if self._main_op == FROM_VAR:
             if self._sons[0] in kwargs:
+                # noinspection PyTypeChecker
                 return kwargs[self._sons[0]]
             if not kwargs:
                 return self._sons[0]()
@@ -238,7 +257,7 @@ class Function:
             if not kwargs:
                 kwargs = {var.name: var() for var in self._vars}
 
-            elif self._vars - given_keys != set() :
+            elif self._vars - given_keys != set():
                 raise ValueError(f"Not enough parameters: expected {self._vars}, "
                                  f"got {given_keys}")
 
@@ -256,12 +275,77 @@ class Function:
                     raise WTFError()
             return self._sons[0](**res_kwargs)
 
-        elif self._main_op in BINARY:
-            return BINARY_OPERATIONS[self._main_op](self._sons[0](**kwargs),
-                                                    self._sons[1](**kwargs))
+        elif self._main_op in BINARY_OPERATORS:
+            return BINARY_DICT[self._main_op](self._sons[0](**kwargs),
+                                              self._sons[1](**kwargs))
 
         else:
             raise WTFError()
+
+    def _partial_complex_der(self, var: Var):
+        assert var in self._vars
+        assert self._main_op == SUPERPOSITION
+        res = from_const_factory(0)
+        F = self._sons[0]         # type: Function
+
+        # sum of ( dF / d _sub_var ) * (d _sub_var / d var)
+        for _sub_var in F._vars:
+            dFdf = F.partial_derivative(_sub_var)
+            dFdf = dFdf.superposition(**self._superpos_sons)
+            f = self._superpos_sons[_sub_var.name]  # type: Function
+            dfdx = f.partial_derivative(var)
+            res += dFdf * dfdx
+        return res
+
+    def _simple_derivative(self, var: Var):
+        assert self._main_op == FROM_FUNC
+        assert var in self._vars
+        func = self._sons[0]    # type: callable
+        var_name = var.name
+
+        def res_func(**kwargs):
+            with LOCK:
+                kwargs[var_name] += self.delta_x
+                f1 = func(**kwargs)
+                kwargs[var_name] -= self.delta_x * 2
+                f2 = func(**kwargs)
+                kwargs[var_name] += self.delta_x
+            return (f1 - f2) / (self.delta_x * 2)
+
+        # TODO: add name
+        return Function(FROM_FUNC, self._vars, res_func, check_signature=False)
+
+    def partial_derivative(self, var: Var):
+
+        if var not in self._vars:
+            return from_const_factory(0)
+
+        if self._main_op == SUPERPOSITION:
+            return self._partial_complex_der(var)
+
+        elif self._main_op == FROM_FUNC:
+            return self._simple_derivative(var)
+
+        elif self._main_op == FROM_VAR:
+            return from_const_factory(1)
+
+        elif self._main_op == FROM_CONST:
+            return from_const_factory(0)
+
+        elif self._main_op in BINARY_OPERATORS:
+            return self._binary_op_derivative(var)
+        else:
+            raise WTFError()
+
+    def _binary_op_derivative(self, var: Var):
+        assert var in self._vars
+        u = self._sons[0]   # type: Function
+        v = self._sons[1]   # type: Function
+        u_der = u.partial_derivative(var)
+        v_der = v.partial_derivative(var)
+
+        res = SIMPLE_DERIVATIVES[self._main_op](u, v, u_der, v_der)  # type: Function
+        return res
 
 
 def from_func_factory(func: callable, variables: typ.Set[Var], name=''):
