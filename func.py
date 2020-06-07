@@ -69,7 +69,10 @@ ELEMENTARY_FUNCTIONS = {
     'sqrt': (np.sqrt, 0, inf),
     'tan':  (np.tan, -np.pi/2, np.pi/2),
     'log':  (np.log, 0, inf),
-    'pow':  (get_power, -inf, inf)
+    'pow':  (get_power, -inf, inf),
+    'exp':  (np.exp, -inf, inf),
+    'sinh': (np.sinh, -inf, inf),
+    'cosh': (np.cosh, -inf, inf),
 }
 
 LOCK = RLock()
@@ -182,7 +185,7 @@ class Function:
 
     def __init__(self, main_op: str, variables: typ.Set[Var],
                  *sons: typ.Union[typ.Callable, float, int],
-                 name='', check_signature=True, **superpos_sons):
+                 name='', str_repr='', check_signature=True, **superpos_sons):
         assert main_op in OPERATORS, 'bad operation'
         assert all(isinstance(var, Var) for var in variables), 'bad variable'
         assert not (len(sons) > 1 and main_op in UNARY_OPERATORS), 'bad amount of sons'
@@ -198,12 +201,26 @@ class Function:
 
         self._superpos_sons = superpos_sons
         self._sons = sons
-        self.name = name
+        self._name = name
+        self._str_repr = str_repr
         if self._main_op == FROM_FUNC and check_signature:
             self._check_function()
 
         if self._main_op == SUPERPOSITION:
             self._check_superposition()
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, new_name: str):
+        with LOCK:
+            self._name = new_name
+
+    def set_str_repr(self, value: str):
+        with LOCK:
+            self._str_repr = value
 
     def _check_superposition(self):
         given_vars = set(self._superpos_sons.keys())
@@ -343,13 +360,18 @@ class Function:
         res = from_const_factory(0)
         F = self._sons[0]         # type: Function
 
+        str_rep = ''
         # sum of ( dF / d _sub_var ) * (d _sub_var / d var)
         for _sub_var in F._vars:
             dFdf = F.partial_derivative(_sub_var)
             dFdf = dFdf.substitute(**self._superpos_sons)
             f = self._superpos_sons[_sub_var.name]  # type: Function
             dfdx = f.partial_derivative(var)
-            res += dFdf * dfdx
+            add = dFdf * dfdx
+            res += add
+            str_rep += str(add)
+
+        res.set_str_repr(str_rep)
         return res
 
     def _simple_derivative(self, var: Var):
@@ -368,7 +390,8 @@ class Function:
             return (f1 - f2) / (self.delta_x * 2)
 
         # TODO: add name
-        return Function(FROM_FUNC, self._vars, res_func, check_signature=False)
+        return Function(FROM_FUNC, self._vars, res_func, check_signature=False,
+                        str_repr=f'd/d{var} ({self})')
 
     def partial_derivative(self, var: Var):
 
@@ -422,6 +445,42 @@ class Function:
         else:
             raise NotImplementedError()
 
+    def __str__(self):
+        if self._str_repr:
+            return self._str_repr
+
+        variables = ', '.join([str(var) for var in self._vars])
+        if self._name:
+            return f'{self._name}({variables})'
+        else:
+            if self._main_op == FROM_FUNC:
+                func = self._sons[0]     # type: callable
+                doc = f'{func.__name__}({variables})'
+                return doc
+            elif self._main_op in {FROM_VAR, FROM_CONST}:
+                return str(self._sons[0])
+
+            elif self._main_op == SUPERPOSITION:
+                func = self._sons[0]  # type: Function
+                res_doc = str(func)
+                for el in func.get_vars():
+                    res_doc = res_doc.replace(str(el), str(self._superpos_sons[el]))
+                return res_doc
+
+            elif self._main_op in BINARY_OPERATORS:
+                f, g = self._sons[0], self._sons[1]   # type: Function
+                if self._main_op == R_DIVISION:
+                    return f'({g} {DIVISION} {f})'
+                elif self._main_op == R_SUBTRACTION:
+                    return f'({g} {SUBTRACTION} {f})'
+                else:
+                    return f'({f} {self._main_op} {g})'
+            else:
+                raise WTFError()
+
+    def __repr__(self):
+        return str(self)
+
 
 class ElementaryFunction(Function):
 
@@ -470,6 +529,12 @@ class ElementaryFunction(Function):
             nom = from_const_factory(1)
             denom = from_var_factory(var)
             return nom / denom
+        elif self._el_type == 'sinh':
+            return ElementaryFunction('cosh', var)
+        elif self._el_type == 'cosh':
+            return ElementaryFunction('sinh', var)
+        elif self._el_type == 'exp':
+            return ElementaryFunction('exp', var)
         elif self._el_type == 'pow':
             return ElementaryFunction('pow', var, self._n-1) * self._n
         else:
@@ -523,3 +588,6 @@ sin = _elementary_factory('sin')
 sqrt = _elementary_factory('sqrt')
 tan = _elementary_factory('tan')
 log = _elementary_factory('log')
+sinh = _elementary_factory('sinh')
+cosh = _elementary_factory('cosh')
+exp = _elementary_factory('exp')

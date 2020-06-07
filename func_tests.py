@@ -315,15 +315,14 @@ class MyTestCase(unittest.TestCase):
         x3_var = Var('x3')
         x4_var = Var('x4')
 
+        test_f1 = from_func_factory(f, {x1_var, x2_var, x3_var})
+        test_f2 = sqrt(cos(x1_var) ** 2 + sin(x2_var) ** 4) + x3_var
+
         x1_var.set_value(random.random())
         x2_var.set_value(random.random())
         x3_var.set_value(random.random())
         x4_var.set_value(random.random())
-
         delta = 10e-7
-
-        test_f1 = from_func_factory(f, {x1_var, x2_var, x3_var})
-        test_f2 = sqrt(cos(x1_var) ** 2 + sin(x2_var) ** 4) + x3_var
 
         self.assertAlmostEqual(test_f1(), test_f2(), delta=delta)
 
@@ -331,6 +330,34 @@ class MyTestCase(unittest.TestCase):
             self.assertAlmostEqual(test_f1.partial_derivative(_x)(),
                                    test_f2.partial_derivative(_x)(),
                                    delta=delta)
+
+        def x1_f(s, t):
+            return np.log(s) + np.sqrt(t)
+
+        def x2_f(s, t):
+            return s + t
+
+        def x3_f(s, t):
+            return np.tan(s) * t
+
+        s_var = Var("s")
+        t_var = Var("t")
+
+        x1_func = from_func_factory(x1_f, {s_var, t_var})
+        x2_func = from_func_factory(x2_f, {s_var, t_var})
+        x3_func = from_func_factory(x3_f, {s_var, t_var})
+
+        test_g1 = test_f1.substitute(x1=x1_func, x2=x2_func, x3=x3_func)
+        test_g2 = test_f2.substitute(x1=x1_func, x2=x2_func, x3=x3_func)
+
+        s_var.set_value(random.random())
+        t_var.set_value(random.random())
+
+        for _x in [x1_var, x2_var, x3_var, s_var, t_var]:
+            self.assertAlmostEqual(test_g1.partial_derivative(_x)(),
+                                   test_g2.partial_derivative(_x)(),
+                                   delta=delta)
+
 
 # TODO: add more unit tests
 #       - partial derivative n
