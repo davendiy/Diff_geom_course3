@@ -94,14 +94,22 @@ class NotInitialisedVarError(TypeError):
         return f"Call for not initialised variable: {self.name}."
 
 
-class Var:
+class NamewiseSingleton(type):
 
-    __instances = {}
+    _lock = RLock()
 
-    def __new__(cls, name: str, left=float('-inf'), right=float('inf')):
+    def __init__(cls, name, bases, dct):
+        super().__init__(name, bases, dct)
+        cls.__instances = {}
+
+    def __call__(cls, name, *args, **kwargs):
         if name not in cls.__instances:
-            cls.__instances[name] = super().__new__(cls)
+            with cls._lock:
+                cls.__instances[name] = super().__call__(name, *args, **kwargs)
         return cls.__instances[name]
+
+
+class Var(metaclass=NamewiseSingleton):
 
     def __init__(self, name: str, left=float('-inf'), right=float('inf')):
         self.name = name
